@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     
     # Environment
     environment: str = "development"
+
+    # Snowflake variables
+    snowflake_user: str
+    snowflake_password: str
+    snowflake_account: str
     
     class Config:
         env_file = ".env"
