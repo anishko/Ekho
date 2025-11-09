@@ -20,8 +20,10 @@ class SnowflakeService:
                 account=settings.snowflake_account,
                 warehouse='EKHO_WH',
                 database='EKHO_DB',
-                schema='ANALYTICS'
+                schema='ANALYTICS',
+                autocommit=True
             )
+            self.conn.cursor().execute("USE WAREHOUSE EKHO_WH")
             logger.info("Snowflake connection successful.")
         except Exception as e:
             logger.error(f"Failed to connect to Snowflake: {e}")

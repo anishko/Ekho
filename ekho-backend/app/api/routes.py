@@ -15,7 +15,7 @@ from app.services.veo_service import VeoService
 from app.services.storage_service import StorageService
 from app.services.mongodb_service import MongoDBService
 from app.services.snowflake_service import SnowflakeService
-from app.services.gemini_service import GeminiService #TODO: Needs gemini service implementation
+from app.services.gemini_service import GeminiService
 from datetime import datetime, timezone
 
 router = APIRouter(prefix="/api/v1", tags=["ekho"])
@@ -59,7 +59,23 @@ async def chat(request: ChatRequest):
             user_profile = {"user_id": request.user_id, "name": "User"}
         
         history = await mongodb_service.get_conversation_history(request.user_id)
+        print(f"Retrieved {len(history)} history items for user {request.user_id}")
+        """
+        # --- 5. MOCK GEMINI RESPONSE BLOCK ---
+        # This block simulates the output from GeminiService
+        # We'll create a fake response based on the user's message
+        
+        mock_mode = "therapist" if "sad" in request.message else "casual"
+        mock_tone = "anxious" if "sad" in request.message else "neutral"
 
+        gemini_response = {
+            "text": f"This is a mocked AI response to: '{request.message}'",
+            "mode": mock_mode,
+            "emotional_tone": mock_tone
+        }
+        # --- END OF MOCK BLOCK ---
+
+        """
         # 2. Call Gemini service for text response
         gemini_response = await gemini_service.generate_response(
             user_message=request.message,
@@ -227,15 +243,16 @@ async def get_user_jobs(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+"""
 # -------------------------
 # Chat endpoint
 # -------------------------
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    """
+    """"""
     User sends message, get AI response text.
     If make_video=True, also start Veo generation and return video_job_id.
-    """
+    """"""
     # 1) text reply (Gemini or stub)
     reply = gemini_service.generate(req.message, user_name=req.user_id)
 
@@ -256,3 +273,4 @@ async def chat(req: ChatRequest):
             print("⚠️ Veo kick-off failed in /chat:", e)
 
     return ChatResponse(text=reply, video_job_id=video_job_id)
+"""
