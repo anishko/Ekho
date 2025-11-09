@@ -353,7 +353,3 @@ class VeoServiceREST:
 
         return resp.json()
 
-
-# Singleton instance - This is no longer used by routes.py
-# You can remove this or keep it, but routes.py is what matters.
-# veo_service = VeoServiceREST(...)

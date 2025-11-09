@@ -56,5 +56,3 @@ class GeminiService:
 
         # --- 5. RUN THE BLOCKING CALL IN A THREAD ---
         return await asyncio.to_thread(self._generate_sync, prompt)
-
-gemini_service = GeminiService()

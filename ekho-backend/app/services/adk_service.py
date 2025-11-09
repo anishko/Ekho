@@ -154,5 +154,3 @@ class ADKAgentService:
         return {"emotional_tag": emotion, "sentiment_score": sentiment, "mode": mode_final}
 
 
-# Singleton exporter for easy import in routes
-adk_service = ADKAgentService()
