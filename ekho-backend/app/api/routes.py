@@ -1,9 +1,12 @@
-# app/api/routes.py
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import (
+    APIRouter, HTTPException, BackgroundTasks, 
+    UploadFile, File, Path
+)
 from typing import Optional
 from datetime import datetime, timezone
 from app.config import get_settings
 
+# --- 1. IMPORT ALL SCHEMAS ---
 from app.models.schemas import (
     VideoGenerationRequest,
     VideoGenerationResponse,
@@ -12,18 +15,21 @@ from app.models.schemas import (
     HealthCheckResponse,
     ChatRequest,
     ChatResponse,
+    CloneVoiceResponse,
 )
+# --- 2. IMPORT ALL SERVICES ---
 from app.services.veo_service import VeoServiceREST
 from app.services.storage_service import StorageService
 from app.services.mongodb_service import MongoDBService
 from app.services.snowflake_service import SnowflakeService
 from app.services.gemini_service import GeminiService
-
+from app.services.elevenlabs_service import ElevenLabsService
 # 🔹 ADK orchestration
 from app.services.adk_service import adk_service
 
 router = APIRouter(prefix="/api/v1", tags=["ekho"])
 
+# --- 3. LOAD SETTINGS & INSTANTIATE ALL SERVICES ---
 settings = get_settings()
 
 storage_service = StorageService()
@@ -38,8 +44,10 @@ veo_service = VeoServiceREST(project_id=settings.google_cloud_project,
 mongodb_service = MongoDBService()
 snowflake_service = SnowflakeService()
 gemini_service = GeminiService()
+elevenlabs_service = ElevenLabsService()
 
 
+# --- 4. HELPER FUNCTION ---
 def _calculate_sentiment(emotional_tag: str) -> float:
     """Converts a string emotion tag into a numeric score for analytics."""
     tag = (emotional_tag or "").lower()
@@ -49,6 +57,38 @@ def _calculate_sentiment(emotional_tag: str) -> float:
         return 0.5
     return 0.0
 
+# --- 5. ALL API ENDPOINTS ---
+
+@router.post("/clone-voice/{user_id}", response_model=CloneVoiceResponse)
+async def clone_voice(
+    user_id: str = Path(..., description="The user ID to associate the voice with"), 
+    audio_file: UploadFile = File(...)
+):
+    """
+    Accepts a 30-sec audio file, clones the voice,
+    and saves the voice_id to the user's profile.
+    """
+    try:
+        audio_bytes = await audio_file.read()
+        
+        # 1. Call the service to clone the voice
+        voice_id = await elevenlabs_service.clone_voice(audio_bytes, user_id)
+        
+        # 2. Save the new voice_id to the user's profile in MongoDB
+        await mongodb_service.update_user_profile(
+            user_id,
+            {"voice_id": voice_id}
+        )
+        
+        return CloneVoiceResponse(
+            user_id=user_id,
+            voice_id=voice_id,
+            status="cloned"
+        )
+        
+    except Exception as e:
+        print(f"❌ Failed to clone voice for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/health", response_model=HealthCheckResponse)
 async def health_check():
@@ -81,7 +121,7 @@ async def chat_full(request: ChatRequest):
         print(f"Retrieved {len(history)} history items for user {request.user_id}")
         
         # 2) Generate text via the working Gemini wrapper
-        reply_text = gemini_service.generate(
+        reply_text = await gemini_service.generate(
             user_message=request.message, user_name=request.user_id
         )
 
@@ -95,10 +135,13 @@ async def chat_full(request: ChatRequest):
 
         if getattr(request, "make_video", False):
             try:
+                # --- BUG FIX: Pass avatar reference images here ---
+                avatar_refs = user_profile.get("avatar_reference_urls", []) 
+
                 video_job_result = await veo_service.generate_avatar_video(
                     user_id=request.user_id,
                     prompt=reply_text,
-                    reference_images=[],
+                    reference_images=avatar_refs, # <-- FIXED
                     duration=max(5, min(30, len(reply_text) // 15)),
                     style="conversational",
                 )
@@ -151,7 +194,7 @@ async def chat_full(request: ChatRequest):
 async def chat(req: ChatRequest):
     """
     User sends message, get AI response text.
-    If make_video=True, also start Veo generation in best-effort mode.
+    If make_video=True, also start Veo generation and ElevenLabs audio.
     ADK orchestrates memory/pattern/safety and logs post-chat.
     """
     try:
@@ -161,24 +204,60 @@ async def chat(req: ChatRequest):
         # 1) Run ADK agents in parallel (memory, trends, safety)
         ctx = await adk_service.orchestrate(user_id, message)
         suggested_mode = ctx.get("suggested_mode") or adk_service.detect_mode(message)
+        
+        # --- NEW: Get the user's voice_id from the context ---
+        voice_id = ctx.get("voice_id") # Fetched from user profile via ADK
 
         # 2) Generate a warm reply (Gemini wrapper or stub)
-        reply_text = gemini_service.generate(message, user_name=user_id)
+        reply_text = await gemini_service.generate(message, user_name=user_id)
 
-        # 3) Optionally kick off Veo video (best-effort, non-blocking)
+        # 3) Optionally kick off Veo video & ElevenLabs audio
         video_job_id: Optional[str] = None
+        audio_url: Optional[str] = None  # --- NEW: Initialize audio_url ---
+
         if getattr(req, "make_video", False):
+            # --- Veo Generation (existing code) ---
             try:
+                # --- BUG FIX: You need to pass avatar reference images here ---
+                avatar_refs = ctx.get("avatar_reference_urls", []) # Get refs from ADK context
+                
                 result = await veo_service.generate_avatar_video(
                     user_id=user_id,
                     prompt=reply_text,
-                    reference_images=[],
+                    reference_images=avatar_refs, # <-- Use real refs
                     duration=10,
                     style="conversational",
                 )
                 video_job_id = result.get("job_id")
             except Exception as e:
                 print("⚠️ Veo kick-off failed in /chat:", e)
+
+            # --- NEW: ElevenLabs Audio Generation ---
+            if voice_id:
+                try:
+                    # 1. Generate audio bytes from text
+                    audio_bytes = await elevenlabs_service.generate_speech(
+                        text=reply_text,
+                        voice_id=voice_id
+                    
+                    )
+                    # 2. Upload audio to Google Cloud Storage 
+                    audio_gcs_path = f"users/{user_id}/audio/{datetime.now(timezone.utc).isoformat()}.mp3"
+                    await storage_service.upload_file_bytes(
+                        audio_bytes,
+                        audio_gcs_path,
+                        content_type="audio/mpeg"
+                    )
+                    
+                    # 3. Get a signed URL to return to the frontend
+                    audio_url = await storage_service.get_signed_url(audio_gcs_path)
+
+                except Exception as e:
+                    print(f"⚠️ ElevenLabs audio generation failed in /chat: {e}")
+                    # Don't fail the chat, just return no audio
+            else:
+                print(f"⚠️ No voice_id found for user {user_id}. Skipping audio generation.")
+            # --- END NEW ---
 
         # 4) Persist chat & analytics via ADK helper (Mongo + Snowflake, best-effort)
         log_meta = await adk_service.log_after_chat(
@@ -193,6 +272,7 @@ async def chat(req: ChatRequest):
             text=reply_text,
             video_url=None,
             video_job_id=video_job_id,
+            audio_url=audio_url, # --- NEW: Pass the audio_url ---
             mode=log_meta.get("mode", suggested_mode),
             emotional_tone=log_meta.get("emotional_tag", "neutral"),
         )
@@ -250,7 +330,7 @@ async def generate_video(request: VideoGenerationRequest):
             prompt=request.prompt,
             reference_images=request.reference_images or [],
             duration=request.duration,
-            style=request.style.value,  # ensure enum -> str
+            style=request.style,  # <-- FIXED: Removed .value
         )
 
         return VideoGenerationResponse(

@@ -6,6 +6,7 @@ uvicorn[standard]==0.32.1
 google-cloud-aiplatform==1.90.0
 google-cloud-storage==2.18.2
 google-auth==2.35.0
+google-generativeai
 
 # Data Validation - Pydantic V2
 pydantic==2.12.4
@@ -23,3 +24,6 @@ motor
 
 # Snowflake
 snowflake-connector-python==4.0.0
+
+# ElevenLabs
+elevenlabs

@@ -1,7 +1,7 @@
 import os
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timezone # <-- IMPORT TIMEZONE
 from typing import List, Dict
 
 import httpx
@@ -10,8 +10,9 @@ from google.auth.transport.requests import Request
 
 from app.services.storage_service import storage_service
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Use print instead of logger
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
 
 
 def guess_mime(uri: str) -> str:
@@ -48,11 +49,12 @@ class VeoServiceREST:
             sa_path,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
-        logger.info("VeoServiceREST: using service account from %s", sa_path)
+        print(f"✅ VeoServiceREST: using service account from {sa_path}")
 
     # ---------- Auth ----------
 
     def get_access_token(self) -> str:
+        """Synchronous token fetch/refresh."""
         if not self.credentials.valid:
             self.credentials.refresh(Request())
         return self.credentials.token
@@ -102,7 +104,7 @@ class VeoServiceREST:
         return await self._create_job(
             user_id=user_id,
             prompt=prompt,
-            face_captures=reference_images,
+            face_captures=reference_images, # Re-using face_captures logic
             duration_seconds=duration_seconds,
         )
 
@@ -116,14 +118,14 @@ class VeoServiceREST:
         duration_seconds: int,
     ) -> Dict:
         job_id = f"veo_{user_id}_{uuid.uuid4().hex[:8]}"
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat() # <-- USE TIMEZONE
 
         try:
-            logger.info(
-                "[%s] Uploading %d reference images for %s",
-                job_id, len(face_captures[:3]), user_id
+            print(
+                f"[{job_id}] Uploading {len(face_captures[:3])} reference images for {user_id}"
             )
 
+            # This now calls the fully async upload_reference_images
             gcs_uris = await storage_service.upload_reference_images(
                 user_id=user_id,
                 face_captures=face_captures[:3],
@@ -133,7 +135,7 @@ class VeoServiceREST:
             if not gcs_uris:
                 raise RuntimeError("No reference images uploaded to GCS.")
 
-            logger.info("[%s] GCS URIs: %s", job_id, gcs_uris)
+            print(f"[{job_id}] GCS URIs: {gcs_uris}")
 
             output_prefix = f"{self.output_storage_uri}{job_id}/"
 
@@ -177,13 +179,12 @@ class VeoServiceREST:
             }
             self.jobs[job_id] = job
 
-            logger.info("[%s] Submitted Veo job: %s", job_id, operation_name)
+            print(f"[{job_id}] Submitted Veo job: {operation_name}")
             return job
 
         except Exception as e:
-            logger.error(
-                "[%s] Job creation failed: %s: %s",
-                job_id, type(e).__name__, e, exc_info=True
+            print(
+                f"❌ [{job_id}] Job creation failed: {type(e).__name__}: {e}"
             )
             err = {
                 "job_id": job_id,
@@ -194,7 +195,7 @@ class VeoServiceREST:
                 "video_url": None,
                 "error": str(e),
                 "created_at": now,
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(), # <-- USE TIMEZONE
             }
             self.jobs[job_id] = err
             return err
@@ -213,18 +214,17 @@ class VeoServiceREST:
         try:
             op = await self._fetch_predict_operation(op_name)
         except Exception as e:
-            logger.error(
-                "[%s] fetchPredictOperation failed: %s: %s",
-                job_id, type(e).__name__, e, exc_info=True
+            print(
+                f"❌ [{job_id}] fetchPredictOperation failed: {type(e).__name__}: {e}"
             )
             job["status"] = "error"
             job["error"] = str(e)
-            job["updated_at"] = datetime.utcnow().isoformat()
+            job["updated_at"] = datetime.now(timezone.utc).isoformat() # <-- USE TIMEZONE
             return job
 
-        job["updated_at"] = datetime.utcnow().isoformat()
+        job["updated_at"] = datetime.now(timezone.utc).isoformat() # <-- USE TIMEZONE
 
-        logger.info("[%s] fetchPredictOperation response: %s", job_id, op)
+        print(f"[{job_id}] fetchPredictOperation response: {op}")
 
         # Still running
         if not op.get("done"):
@@ -245,13 +245,12 @@ class VeoServiceREST:
 
         resp = op.get("response") or {}
 
-        # Veo returns: { response: { videos: [ { gcsUri, mimeType } ] } }
+        # ... (same logic as your file to find video_uri) ...
         videos = (
             resp.get("videos")
             or resp.get("generatedVideos")
             or resp.get("generatedSamples", [])
         )
-
         video_uri = None
         if videos:
             v0 = videos[0]
@@ -260,19 +259,18 @@ class VeoServiceREST:
                 or v0.get("uri")
                 or v0.get("videoUri")
             )
-
-        # Fallback: scan nested for anything that looks like a video URL
         if not video_uri:
             video_uri = self._find_any_video_url(resp) or self._find_any_video_url(op)
 
-        # If it's a gs:// URI, return a signed HTTPS URL so the browser can play it
+        
+        # --- CRITICAL FIX: Use 'await' for the async get_signed_url ---
         if video_uri and video_uri.startswith("gs://"):
-            video_uri = storage_service.get_signed_url(video_uri)
+            video_uri = await storage_service.get_signed_url(video_uri)
+        # --- END FIX ---
 
         job["video_url"] = video_uri
-        logger.info(
-            "[%s] Operation done. status=%s, video_url=%s",
-            job_id, job["status"], job.get("video_url")
+        print(
+            f"[{job_id}] Operation done. status={job['status']}, video_url={job.get('video_url')}"
         )
 
         job.setdefault("error", None)
@@ -282,11 +280,8 @@ class VeoServiceREST:
         return [j for j in self.jobs.values() if j.get("user_id") == user_id]
 
     # ---------- Helpers ----------
-
     def _find_any_video_url(self, data) -> str | None:
-        """
-        Recursively search for something that looks like a video URL or GCS URI.
-        """
+        # ... (same recursive logic as your file) ...
         if isinstance(data, dict):
             for _, v in data.items():
                 if isinstance(v, str):
@@ -305,6 +300,7 @@ class VeoServiceREST:
         return None
 
     # ---------- Internal HTTP ----------
+    # This section is already async using httpx, so it's good.
 
     async def _call_predict_long_running(self, json_body: Dict) -> str:
         token = self.get_access_token()
@@ -322,9 +318,8 @@ class VeoServiceREST:
             resp = await client.post(url, headers=headers, json=json_body)
 
         if resp.status_code != 200:
-            logger.error(
-                "Veo predictLongRunning error %s: %s",
-                resp.status_code, resp.text
+            print(
+                f"❌ Veo predictLongRunning error {resp.status_code}: {resp.text}"
             )
             resp.raise_for_status()
 
@@ -351,22 +346,14 @@ class VeoServiceREST:
             resp = await client.post(url, headers=headers, json=body)
 
         if resp.status_code != 200:
-            logger.error(
-                "Veo fetchPredictOperation error %s: %s",
-                resp.status_code, resp.text
+            print(
+                f"❌ Veo fetchPredictOperation error {resp.status_code}: {resp.text}"
             )
             resp.raise_for_status()
 
         return resp.json()
 
 
-# Singleton instance used by your routes
-veo_service = VeoServiceREST(
-    project_id=os.getenv("GOOGLE_CLOUD_PROJECT", "ekho-477607"),
-    location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
-    model_id=os.getenv("VEO_MODEL_ID", "veo-3.1-generate-preview"),
-    output_storage_uri=os.getenv(
-        "VEO_OUTPUT_URI",
-        "gs://ekho-avatars-ekho-477607/output/",
-    ),
-)
+# Singleton instance - This is no longer used by routes.py
+# You can remove this or keep it, but routes.py is what matters.
+# veo_service = VeoServiceREST(...)

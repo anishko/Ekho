@@ -3,49 +3,61 @@ import base64
 import logging
 from typing import List
 from datetime import timedelta
+import asyncio
 
 from google.cloud import storage
 from google.oauth2 import service_account
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Use print instead of logger to match your other files
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
 
 
 class StorageService:
     """Service for handling Google Cloud Storage operations."""
 
     def __init__(self):
-        # Bucket (required)
         bucket_name = os.getenv("STORAGE_BUCKET")
         if not bucket_name:
             raise ValueError("STORAGE_BUCKET not set in environment")
 
-        # Credentials: use explicit service account if provided, else ADC
         creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         if creds_path and os.path.exists(creds_path):
             credentials = service_account.Credentials.from_service_account_file(
                 creds_path
             )
             self.client = storage.Client(credentials=credentials)
-            logger.info(
-                "StorageService: using explicit service account at %s", creds_path
+            print(
+                f"✅ StorageService: using explicit service account at {creds_path}"
             )
         else:
             self.client = storage.Client()
-            logger.info("StorageService: using default application credentials")
+            print("✅ StorageService: using default application credentials")
 
         self.bucket_name = bucket_name
         self.bucket = self.client.bucket(bucket_name)
-        logger.info("StorageService: initialized for bucket %s", bucket_name)
+        print(f"✅ StorageService: initialized for bucket {bucket_name}")
 
-    def check_connection(self) -> bool:
-        """Check if storage bucket is accessible."""
+    def _check_connection_sync(self) -> bool:
+        """Blocking helper for check_connection."""
         try:
             self.client.get_bucket(self.bucket_name)
             return True
         except Exception as e:
-            logger.error("StorageService connection check failed: %s", e)
+            print(f"❌ StorageService connection check failed: {e}")
             return False
+
+    async def check_connection(self) -> bool:
+        """Check if storage bucket is accessible."""
+        return await asyncio.to_thread(self._check_connection_sync)
+
+    def _upload_blob_sync(self, image_data: bytes, object_name: str, content_type: str) -> str:
+        """Blocking helper for uploading."""
+        blob = self.bucket.blob(object_name)
+        blob.upload_from_string(image_data, content_type=content_type)
+        gcs_uri = f"gs://{self.bucket_name}/{object_name}"
+        print(f"Uploaded to {gcs_uri}")
+        return gcs_uri
 
     async def upload_reference_images(
         self,
@@ -54,77 +66,67 @@ class StorageService:
         job_id: str,
     ) -> List[str]:
         """
-        Accepts base64 data URLs from frontend,
-        uploads to GCS, returns gs:// URIs for Veo.
+        Accepts base64 data URLs, uploads to GCS, returns gs:// URIs.
+        Now fully non-blocking.
         """
         uris: List[str] = []
+        upload_tasks = []
 
         for idx, image_b64 in enumerate(face_captures):
             if not image_b64:
                 continue
 
-            # Handle data URLs: data:image/png;base64,xxxx
+            # ... (same base64 decoding logic as your file) ...
             if image_b64.startswith("data:image"):
                 header, b64data = image_b64.split(",", 1)
-                if "png" in header:
-                    ext = "png"
-                    content_type = "image/png"
-                else:
-                    ext = "jpg"
-                    content_type = "image/jpeg"
+                content_type = "image/png" if "png" in header else "image/jpeg"
+                ext = "png" if "png" in header else "jpg"
             else:
                 b64data = image_b64
-                ext = "jpg"
                 content_type = "image/jpeg"
+                ext = "jpg"
 
             try:
                 image_data = base64.b64decode(b64data)
             except Exception as e:
-                logger.error("Error decoding base64 for image %d: %s", idx, e)
+                print(f"❌ Error decoding base64 for image {idx}: {e}")
                 continue
 
             object_name = f"reference/{user_id}/{job_id}/face_{idx}.{ext}"
-            blob = self.bucket.blob(object_name)
+            
+            # Add the async task to a list to run in parallel
+            upload_tasks.append(
+                asyncio.to_thread(
+                    self._upload_blob_sync,
+                    image_data,
+                    object_name,
+                    content_type
+                )
+            )
 
-            try:
-                blob.upload_from_string(image_data, content_type=content_type)
-                gcs_uri = f"gs://{self.bucket_name}/{object_name}"
-                uris.append(gcs_uri)
-                logger.info("Uploaded reference image %d to %s", idx, gcs_uri)
-            except Exception as e:
-                logger.error("Error uploading image %d to GCS: %s", idx, e)
+        # Run all uploads concurrently
+        try:
+            uris = await asyncio.gather(*upload_tasks)
+        except Exception as e:
+            print(f"❌ Error uploading images to GCS: {e}")
 
         return uris
 
-    async def upload_video(
-        self,
-        user_id: str,
-        video_data: bytes,
-        job_id: str,
-    ) -> str:
-        """
-        Optional: upload generated video bytes manually.
-        Veo normally writes directly to GCS via storageUri.
-        """
-        blob_name = f"users/{user_id}/videos/{job_id}.mp4"
-        blob = self.bucket.blob(blob_name)
-        blob.upload_from_string(video_data, content_type="video/mp4")
-        url = self.get_signed_url(f"gs://{self.bucket_name}/{blob_name}")
-        logger.info("Uploaded video to %s", url)
-        return url
-
-    async def cleanup_temp_files(self, user_id: str, job_id: str):
-        """Delete temporary reference images for a job."""
-        prefix = f"reference/{user_id}/{job_id}/"
-        blobs = self.client.list_blobs(self.bucket_name, prefix=prefix)
-        for blob in blobs:
-            logger.info("Deleting temp blob %s", blob.name)
-            blob.delete()
-
-    def get_signed_url(self, gcs_uri: str, expires_seconds: int = 3600) -> str:
-        """
-        Turn gs://bucket/path.mp4 into a time-limited HTTPS URL the browser can play.
-        """
+    async def upload_file_bytes(self, file_bytes: bytes, gcs_path: str, content_type: str):
+        """Helper to upload raw bytes (like audio)"""
+        try:
+            await asyncio.to_thread(
+                self._upload_blob_sync,
+                file_bytes,
+                gcs_path,
+                content_type
+            )
+        except Exception as e:
+            print(f"❌ Error uploading file bytes to {gcs_path}: {e}")
+            raise
+    
+    def _get_signed_url_sync(self, gcs_uri: str, expires_seconds: int) -> str:
+        """Blocking helper for get_signed_url."""
         if not gcs_uri.startswith("gs://"):
             return gcs_uri
 
@@ -136,12 +138,22 @@ class StorageService:
         bucket_name, blob_name = parts
         blob = self.client.bucket(bucket_name).blob(blob_name)
 
-        url = blob.generate_signed_url(
+        return blob.generate_signed_url(
             version="v4",
             expiration=timedelta(seconds=expires_seconds),
             method="GET",
         )
-        return url
 
+    async def get_signed_url(self, gcs_uri: str, expires_seconds: int = 3600) -> str:
+        """
+        Turn gs://bucket/path.mp4 into a time-limited HTTPS URL.
+        Now fully non-blocking.
+        """
+        return await asyncio.to_thread(
+            self._get_signed_url_sync,
+            gcs_uri,
+            expires_seconds
+        )
 
+# Singleton instance
 storage_service = StorageService()

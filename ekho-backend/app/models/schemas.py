@@ -66,11 +66,17 @@ class HealthCheckResponse(BaseModel):
 class ChatRequest(BaseModel):
     user_id: str
     message: str = Field(..., min_length=1, max_length=2000)
-    make_video: bool = False  # NEW: optionally kick off a Veo clip
+    make_video: bool = False 
 
 class ChatResponse(BaseModel):
     text: str
     video_url: Optional[str] = None
-    video_job_id: Optional[str] = None  # NEW: return job id if make_video=True
+    video_job_id: Optional[str] = None 
+    audio_url: Optional[str] = None
     mode: Optional[str] = None
     emotional_tone: Optional[str] = None
+
+class CloneVoiceResponse(BaseModel):
+    user_id: str
+    voice_id: str
+    status: str

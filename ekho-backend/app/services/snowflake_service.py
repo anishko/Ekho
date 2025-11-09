@@ -1,84 +1,89 @@
 import snowflake.connector
 from app.config import get_settings
 from datetime import datetime, timezone
-import logging
+import asyncio
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class SnowflakeService:
     def __init__(self):
         """
         Initialize the Snowflake connection.
         """
-        settings = get_settings()
+        self.settings = get_settings()
+        self.conn = None
+        print("Snowflake Service initialized (but not connected).")
+
+    async def _connect(self):
+        """
+        Asynchronous helper to create the blocking connection in a thread.
+        """
+        if self.conn:
+            return  # Already connected
+
         try:
-            self.conn = snowflake.connector.connect(
-                user=settings.snowflake_user,
-                password=settings.snowflake_password,
-                account=settings.snowflake_account,
-                warehouse='EKHO_WH',
+            self.conn = await asyncio.to_thread(
+                snowflake.connector.connect,
+                user=self.settings.snowflake_user,
+                password=self.settings.snowflake_password,
+                account=self.settings.snowflake_account,
                 database='EKHO_DB',
                 schema='ANALYTICS',
                 autocommit=True
             )
-            self.conn.cursor().execute("USE WAREHOUSE EKHO_WH")
-            logger.info("Snowflake connection successful.")
+            await asyncio.to_thread(self.conn.cursor().execute, "USE WAREHOUSE EKHO_WH")
+            print("✅ Snowflake connection successful and warehouse set.")
         except Exception as e:
-            logger.error(f"Failed to connect to Snowflake: {e}")
+            print(f"❌ Failed to connect to Snowflake: {e}")
             self.conn = None
 
-    def _get_cursor(self):
+    async def _ensure_connected(self):
+        """Ensures a valid connection exists before running a query."""
         if not self.conn:
-            logger.error("No Snowflake connection available.")
-            return None
-        return self.conn.cursor()
+            await self._connect()
+        if not self.conn:
+            raise Exception("Snowflake connection is not established.")
 
     async def log_conversation_analytic(
         self, 
         user_id: str, 
         emotional_tag: str,
         conversation_mode: str,
-        sentiment_score: float # You'll need to generate this, e.g., from Gemini
+        sentiment_score: float
     ):
         """
-        Insert aggregated conversation data into Snowflake for analytics.
-        This is part of your ETL process.
+        Insert aggregated conversation data into Snowflake (non-blocking).
         """
-        cursor = self._get_cursor()
-        if not cursor:
-            return
-
+        await self._ensure_connected() # Ensure connection is active
+        
         query = """
         INSERT INTO conversations 
         (user_id, emotional_tag, conversation_mode, sentiment_score, timestamp)
         VALUES (%s, %s, %s, %s, %s)
         """
         try:
-            cursor.execute(query, (
-                user_id,
-                emotional_tag,
-                conversation_mode,
-                sentiment_score,
-                datetime.now(timezone.utc)
-            ))
-            logger.info(f"Logged analytic for user {user_id} to Snowflake.")
+            # Run the blocking DB call in a thread
+            await asyncio.to_thread(
+                self.conn.cursor().execute,
+                query,
+                (
+                    user_id,
+                    emotional_tag,
+                    conversation_mode,
+                    sentiment_score,
+                    datetime.now(timezone.utc)
+                )
+            )
+            print(f"Logged analytic for user {user_id} to Snowflake.")
         except Exception as e:
-            logger.error(f"Failed to insert analytic into Snowflake: {e}")
-        finally:
-            cursor.close()
+            print(f"❌ Failed to insert analytic into Snowflake: {e}")
+            self.conn = None # Force reconnect on next call
 
     async def analyze_emotional_trends(self, user_id: str):
         """
-        Get 30-day emotional trend for a user.
-        This will be used by the Pattern Agent.
+        Get 30-day emotional trend for a user (non-blocking).
         """
-        cursor = self._get_cursor()
-        if not cursor:
-            return []
+        await self._ensure_connected()
 
-        # This query is from the project documentation
         query = """
         SELECT
             DATE(timestamp) as date,
@@ -90,23 +95,22 @@ class SnowflakeService:
         GROUP BY DATE(timestamp)
         ORDER BY date
         """
+        
         try:
-            cursor.execute(query, (user_id,))
-            return cursor.fetchall() #
+            # Run blocking cursor and fetchall in a thread
+            def _run_query():
+                cursor = self.conn.cursor()
+                cursor.execute(query, (user_id,))
+                return cursor.fetchall()
+
+            return await asyncio.to_thread(_run_query)
+        
         except Exception as e:
-            logger.error(f"Failed to analyze emotional trends: {e}")
+            print(f"❌ Failed to analyze emotional trends: {e}")
+            self.conn = None
             return []
-        finally:
-            cursor.close()
 
-    async def predict_emotional_state(self, user_id: str):
-        """
-        ML model prediction of next emotional state.
-        This is a Phase 3 (Polish) feature.
-        """
-        pass #
-
-    def close(self):
+    async def close(self):
         if self.conn:
-            self.conn.close()
-            logger.info("Snowflake connection closed.")
+            await asyncio.to_thread(self.conn.close)
+            print("Snowflake connection closed.")

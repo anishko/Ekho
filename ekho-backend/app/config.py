@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     snowflake_password: str = Field(..., alias="SNOWFLAKE_PASSWORD")
     snowflake_account: str = Field(..., alias="SNOWFLAKE_ACCOUNT")
 
+    # ElevenLabs (required)
+    elevenlabs_api_key: str = Field(..., alias="ELEVENLABS_API_KEY")
+
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
