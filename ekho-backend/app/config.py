@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     max_video_duration: int = 30
     max_reference_images: int = 5
     rate_limit_per_minute: int = 10
+    # veo_api_key: str
+    # gemini_api_key: str
+    # google_api_token: str
     
     # Environment
     environment: str = "development"
