@@ -25,7 +25,7 @@ from app.services.snowflake_service import SnowflakeService
 from app.services.gemini_service import GeminiService
 from app.services.elevenlabs_service import ElevenLabsService
 # 🔹 ADK orchestration
-from app.services.adk_service import adk_service
+from app.services.adk_service import ADKAgentService
 
 router = APIRouter(prefix="/api/v1", tags=["ekho"])
 
@@ -45,6 +45,7 @@ mongodb_service = MongoDBService()
 snowflake_service = SnowflakeService()
 gemini_service = GeminiService()
 elevenlabs_service = ElevenLabsService()
+adk_service = ADKAgentService()
 
 
 # --- 4. HELPER FUNCTION ---
